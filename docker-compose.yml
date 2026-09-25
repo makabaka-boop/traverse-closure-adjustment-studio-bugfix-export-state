@@ -1,0 +1,11 @@
+# 离线纯前端平差工作台：仅 web 一个服务，构建后为纯静态站点
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: traverse-adjustment-workbench:latest
+    container_name: traverse-adjustment-web
+    ports:
+      - "8080:80"
+    restart: unless-stopped
