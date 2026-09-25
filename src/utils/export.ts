@@ -94,12 +94,35 @@ export function downloadResultJson(result: AdjustmentResult): void {
   downloadBlob(stringifyResult(result), 'traverse-adjustment.json', 'application/json');
 }
 
-export function downloadCanvasPng(canvas: HTMLCanvasElement): void {
-  canvas.toBlob((blob) => {
-    if (!blob) return;
-    downloadBlob(blob, 'traverse-chart.png', 'image/png');
-  }, 'image/png');
+/**
+ * 下载画布 PNG。返回是否真的产生了下载：
+ * toBlob 编码失败（返回 null，常见于零尺寸/未绘制画布）时返回 false，
+ * 调用方必须据此给出失败提示，不得宣称成功。
+ */
+export async function downloadCanvasPng(canvas: HTMLCanvasElement): Promise<boolean> {
+  const blob = await new Promise<Blob | null>((resolve) =>
+    canvas.toBlob(resolve, 'image/png'),
+  );
+  if (!blob) return false;
+  downloadBlob(blob, 'traverse-chart.png', 'image/png');
+  return true;
 }
+
+/**
+ * 导出画布前的硬性前置校验：CSS 尺寸与位图尺寸都必须非零。
+ * 隐藏（display:none）或尺寸尚为零时 clientWidth/Height 为 0，
+ * 即使残留旧位图（canvas.width 仍非零）也一律拒绝导出。
+ */
+export function isCanvasDrawable(canvas: HTMLCanvasElement): boolean {
+  return (
+    canvas.clientWidth > 0 &&
+    canvas.clientHeight > 0 &&
+    canvas.width > 0 &&
+    canvas.height > 0
+  );
+}
+
+export type CanvasExportOutcome = 'shared' | 'downloaded' | 'cancelled' | 'failed';
 
 interface ShareableNavigator {
   canShare?: (data: ShareData) => boolean;
@@ -109,10 +132,17 @@ interface ShareableNavigator {
 /**
  * 画布共享：支持 Web Share（含文件）时走系统分享面板，
  * 否则降级为下载 PNG。保证离线环境下也有可用出口。
+ *
+ * 四种结果严格区分，调用方必须按结果给出对应提示：
+ * - shared：分享面板确认完成；
+ * - downloaded：环境不支持分享，已真实下载；
+ * - cancelled：用户在分享面板取消，未分享也未下载，不得提示已下载；
+ * - failed：编码为空、零尺寸或其他异常，没有任何文件交付。
  */
 export async function shareOrDownloadCanvas(
   canvas: HTMLCanvasElement,
-): Promise<'shared' | 'downloaded' | 'failed'> {
+): Promise<CanvasExportOutcome> {
+  if (!isCanvasDrawable(canvas)) return 'failed';
   const nav = navigator as ShareableNavigator;
   try {
     const blob = await new Promise<Blob | null>((resolve) =>
@@ -127,8 +157,9 @@ export async function shareOrDownloadCanvas(
     downloadBlob(blob, 'traverse-chart.png', 'image/png');
     return 'downloaded';
   } catch (err) {
+    // 用户取消分享：没有任何交付物，与“已下载”严格区分
     if (err instanceof DOMException && err.name === 'AbortError') {
-      return 'downloaded';
+      return 'cancelled';
     }
     return 'failed';
   }

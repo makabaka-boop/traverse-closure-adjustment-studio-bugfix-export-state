@@ -1,5 +1,8 @@
-import { useMemo, useRef, useState } from 'react';
-import { TraverseChart } from './components/TraverseChart';
+import { useCallback, useMemo, useRef, useState } from 'react';
+import {
+  canvasMatchesResult,
+  TraverseChart,
+} from './components/TraverseChart';
 import { ResultTable } from './components/ResultTable';
 import { adjustTraverse } from './core/adjustment';
 import { parseTraverseInput } from './core/parse';
@@ -8,6 +11,7 @@ import { SAMPLE_JSON } from './core/sample';
 import {
   downloadCanvasPng,
   downloadResultJson,
+  isCanvasDrawable,
   shareOrDownloadCanvas,
 } from './utils/export';
 
@@ -18,7 +22,20 @@ export function App() {
   const [rawEdges, setRawEdges] = useState<RawEdge[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [noticeKind, setNoticeKind] = useState<'info' | 'error'>('info');
+  // 当前平差结果的位图是否已实际绘制（隐藏/零尺寸时为 false）
+  const [chartReady, setChartReady] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const canvasHostRef = useRef<HTMLDivElement>(null);
+
+  const handleChartReadyChange = useCallback((ready: boolean) => {
+    setChartReady(ready);
+  }, []);
+
+  const showNotice = (text: string, kind: 'info' | 'error' = 'info') => {
+    setNotice(text);
+    setNoticeKind(kind);
+  };
 
   const closureInfo = useMemo(() => {
     if (!result) return null;
@@ -62,31 +79,63 @@ export function App() {
     setRawEdges([]);
     setError(null);
     setNotice(null);
+    setChartReady(false);
   };
 
   const getCanvas = (): HTMLCanvasElement | null =>
     canvasHostRef.current?.querySelector('canvas') ?? null;
 
+  /**
+   * 取“可交付的当前图形画布”：必须存在、尺寸非零且位图签名与当前平差一致。
+   * 隐藏期间残留的旧画布或空画布一律拒绝，避免把过期/缺失图形当成成果。
+   */
+  const getExportableCanvas = (): HTMLCanvasElement | null => {
+    if (!result || !chartReady) return null;
+    const canvas = getCanvas();
+    if (!canvas || !isCanvasDrawable(canvas)) return null;
+    return canvasMatchesResult(canvas, result) ? canvas : null;
+  };
+
   const handleDownloadJson = () => {
     if (!result) return;
     downloadResultJson(result);
-    setNotice('已下载 JSON 结果（BigInt 精度的精确整数）');
+    showNotice('已下载 JSON 结果（BigInt 精度的精确整数）');
   };
 
-  const handleDownloadPng = () => {
-    const canvas = getCanvas();
-    if (!canvas) return;
-    downloadCanvasPng(canvas);
-    setNotice('已下载画布 PNG');
+  const handleDownloadPng = async () => {
+    const canvas = getExportableCanvas();
+    if (!canvas) {
+      showNotice('当前图形尚未绘制完成，无法下载 PNG', 'error');
+      return;
+    }
+    setExporting(true);
+    try {
+      const ok = await downloadCanvasPng(canvas);
+      if (ok) showNotice('已下载当前平差图形 PNG');
+      else showNotice('PNG 编码为空，下载未完成（未生成任何文件）', 'error');
+    } finally {
+      setExporting(false);
+    }
   };
 
   const handleShare = async () => {
-    const canvas = getCanvas();
-    if (!canvas) return;
-    const mode = await shareOrDownloadCanvas(canvas);
-    if (mode === 'shared') setNotice('已通过系统分享面板共享画布');
-    else if (mode === 'downloaded') setNotice('当前环境不支持分享，已改为下载 PNG');
-    else setNotice('画布导出失败');
+    const canvas = getExportableCanvas();
+    if (!canvas) {
+      showNotice('当前图形尚未绘制完成，无法共享或下载 PNG', 'error');
+      return;
+    }
+    setExporting(true);
+    try {
+      const mode = await shareOrDownloadCanvas(canvas);
+      if (mode === 'shared') showNotice('已通过系统分享面板共享当前平差图形');
+      else if (mode === 'downloaded')
+        showNotice('当前环境不支持分享，已下载当前平差图形 PNG');
+      else if (mode === 'cancelled')
+        showNotice('已取消分享，未共享也未下载任何文件');
+      else showNotice('画布导出失败，未生成任何文件', 'error');
+    } finally {
+      setExporting(false);
+    }
   };
 
   return (
@@ -132,7 +181,11 @@ export function App() {
             </div>
           )}
           {!error && notice && (
-            <div className="banner info" role="status">
+            <div
+              className={`banner ${noticeKind === 'error' ? 'error' : 'info'}`}
+              role="status"
+              data-testid="export-notice"
+            >
               {notice}
             </div>
           )}
@@ -190,10 +243,16 @@ export function App() {
           <div className="chart-toolbar">
             <h2>导线叠画</h2>
             <div className="button-row">
-              <button onClick={handleShare} disabled={!result}>
+              <button
+                onClick={handleShare}
+                disabled={!result || !chartReady || exporting}
+              >
                 共享画布
               </button>
-              <button onClick={handleDownloadPng} disabled={!result}>
+              <button
+                onClick={handleDownloadPng}
+                disabled={!result || !chartReady || exporting}
+              >
                 下载 PNG
               </button>
               <button className="primary" onClick={handleDownloadJson} disabled={!result}>
@@ -202,8 +261,19 @@ export function App() {
             </div>
           </div>
           <div className="chart-host" ref={canvasHostRef}>
-            <TraverseChart result={result} />
+            <TraverseChart result={result} onReadyChange={handleChartReadyChange} />
           </div>
+          {result && (
+            <p
+              className={`chart-state ${chartReady ? 'ready' : 'pending'}`}
+              role="status"
+              data-testid="chart-state"
+            >
+              {chartReady
+                ? '当前平差图形已绘制，可共享或下载 PNG'
+                : '当前平差图形尚未绘制（区域隐藏或尺寸为零），PNG 导出暂不可用'}
+            </p>
+          )}
           {result && (
             <p className="hint chart-meta">
               原始边数 {rawEdges.length}；灰虚线为原始路线（红色为未闭合缺口），蓝实线为平差后路线。

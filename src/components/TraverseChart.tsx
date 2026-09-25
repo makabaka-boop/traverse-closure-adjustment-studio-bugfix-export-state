@@ -10,6 +10,47 @@ import type { AdjustmentResult } from '../core/types';
 
 interface TraverseChartProps {
   result: AdjustmentResult | null;
+  /** 上报“当前 result 的位图是否已实际绘制到画布”，供导出入口做可观察的可用性判断 */
+  onReadyChange?: (ready: boolean) => void;
+}
+
+/**
+ * 当前平差结果的确定性签名：成功绘制某 result 后打在 canvas 上。
+ * 导出时比对签名，可拒绝隐藏/尺寸为零期间残留的旧画布位图，
+ * 保证交付的 PNG 必然来自当前平差结果。
+ */
+export function resultSignature(result: AdjustmentResult): string {
+  return [
+    result.closureX.toString(),
+    result.closureY.toString(),
+    result.totalWeight.toString(),
+    result.edges
+      .map((e) => `${e.id}:${e.dx},${e.dy},${e.weight}=${e.corrX},${e.corrY}`)
+      .join('|'),
+  ].join('#');
+}
+
+const SIGNATURE_KEY = Symbol.for('traverse-chart.result-signature');
+
+/** 读取画布上已成功绘制的结果签名（无标记或旧画布为 null） */
+export function canvasResultSignature(canvas: HTMLCanvasElement): string | null {
+  return (
+    (canvas as unknown as { [SIGNATURE_KEY]?: string })[SIGNATURE_KEY] ?? null
+  );
+}
+
+/** 画布是否为给定结果的、已成功绘制的位图（可见、尺寸非零且签名匹配） */
+export function canvasMatchesResult(
+  canvas: HTMLCanvasElement,
+  result: AdjustmentResult,
+): boolean {
+  return (
+    canvas.clientWidth > 0 &&
+    canvas.clientHeight > 0 &&
+    canvas.width > 0 &&
+    canvas.height > 0 &&
+    canvasResultSignature(canvas) === resultSignature(result)
+  );
 }
 
 const PADDING = 48;
@@ -72,13 +113,16 @@ function drawPolyline(
   ctx.stroke();
 }
 
-function renderChart(canvas: HTMLCanvasElement, result: AdjustmentResult): void {
+/** 绘制当前平差结果；返回位图是否真正生成（ctx 可用且尺寸非零） */
+function renderChart(canvas: HTMLCanvasElement, result: AdjustmentResult): boolean {
   const ctx = canvas.getContext('2d');
-  if (!ctx) return;
+  if (!ctx) return false;
   const dpr = window.devicePixelRatio || 1;
   const cssW = canvas.clientWidth;
   const cssH = canvas.clientHeight;
-  if (cssW === 0 || cssH === 0) return;
+  // 区域隐藏或尺寸尚为零：不绘制、不打签名、不覆盖尺寸，
+  // 避免把旧位图或空画布当成当前图形交付。
+  if (cssW === 0 || cssH === 0) return false;
   canvas.width = Math.round(cssW * dpr);
   canvas.height = Math.round(cssH * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -186,19 +230,33 @@ function renderChart(canvas: HTMLCanvasElement, result: AdjustmentResult): void 
   ctx.textAlign = 'right';
   ctx.fillText(`单位 mm，网格 ${step}`, cssW - 12, cssH - 12);
   ctx.textAlign = 'left';
+
+  // 成功绘制后打上当前结果签名：导出据此核对 PNG 与当前平差一致
+  (canvas as unknown as { [SIGNATURE_KEY]: string })[SIGNATURE_KEY] =
+    resultSignature(result);
+  return true;
 }
 
-export function TraverseChart({ result }: TraverseChartProps) {
+export function TraverseChart({ result, onReadyChange }: TraverseChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const readyCallbackRef = useRef(onReadyChange);
+  readyCallbackRef.current = onReadyChange;
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !result) return;
-    const draw = () => renderChart(canvas, result);
+    // 每次结果变化先按“未就绪”处理：恢复绘制完成前不得导出旧位图
+    readyCallbackRef.current?.(false);
+    const draw = () => readyCallbackRef.current?.(renderChart(canvas, result));
     draw();
     const ro = new ResizeObserver(draw);
     ro.observe(canvas);
     return () => ro.disconnect();
+  }, [result]);
+
+  // 结果被清空：显式回到未就绪，避免父组件保留过期的可导出状态
+  useEffect(() => {
+    if (!result) readyCallbackRef.current?.(false);
   }, [result]);
 
   if (!result) {
