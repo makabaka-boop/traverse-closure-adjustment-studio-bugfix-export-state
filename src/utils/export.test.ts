@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { stringifyResult } from './export';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { downloadCanvasPng, shareOrDownloadCanvas, stringifyResult } from './export';
 import { adjustTraverse } from '../core/adjustment';
 import type { RawEdge } from '../core/types';
 
@@ -43,5 +43,116 @@ describe('stringifyResult', () => {
     expect(parsed.totalWeightExact).toBe((BigInt(big) * 2n + 1n).toString());
     // 文本中包含精确字面量（无引号）
     expect(json).toContain(`"totalWeightExact": "${BigInt(big) * 2n + 1n}"`);
+  });
+});
+
+/** 画布导出/共享的下载计数与桩 */
+describe('画布 PNG 导出与共享', () => {
+  let clickSpy: ReturnType<typeof vi.spyOn>;
+
+  const makeCanvas = (blob: Blob | null): HTMLCanvasElement => {
+    const canvas = document.createElement('canvas');
+    canvas.toBlob = (cb: BlobCallback) => {
+      cb(blob);
+    };
+    return canvas;
+  };
+
+  const stubShare = (canShare: boolean, shareImpl?: () => Promise<void>) => {
+    Object.defineProperty(window.navigator, 'canShare', {
+      value: vi.fn(() => canShare),
+      configurable: true,
+    });
+    Object.defineProperty(window.navigator, 'share', {
+      value: vi.fn(shareImpl ?? (() => Promise.resolve())),
+      configurable: true,
+    });
+  };
+
+  beforeEach(() => {
+    clickSpy = vi
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(() => {});
+    (URL as unknown as Record<string, unknown>).createObjectURL = vi.fn(
+      () => 'blob:mock',
+    );
+    (URL as unknown as Record<string, unknown>).revokeObjectURL = vi.fn();
+  });
+
+  afterEach(() => {
+    clickSpy.mockRestore();
+    const nav = window.navigator as unknown as Record<string, unknown>;
+    delete nav.share;
+    delete nav.canShare;
+  });
+
+  it('toBlob 返回 null（空画布编码）时不下载且结果为 false', async () => {
+    const ok = await downloadCanvasPng(makeCanvas(null));
+    expect(ok).toBe(false);
+    expect(clickSpy).not.toHaveBeenCalled();
+  });
+
+  it('toBlob 正常时恰好下载一次且结果为 true', async () => {
+    const ok = await downloadCanvasPng(
+      makeCanvas(new Blob(['png'], { type: 'image/png' })),
+    );
+    expect(ok).toBe(true);
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('支持系统分享且用户确认：shared，不产生降级下载', async () => {
+    stubShare(true);
+    const outcome = await shareOrDownloadCanvas(
+      makeCanvas(new Blob(['png'], { type: 'image/png' })),
+    );
+    expect(outcome).toBe('shared');
+    expect(window.navigator.share).toHaveBeenCalledTimes(1);
+    expect(clickSpy).not.toHaveBeenCalled();
+  });
+
+  it('用户取消系统分享面板（AbortError）：cancelled，不补发下载', async () => {
+    stubShare(true, () =>
+      Promise.reject(new DOMException('用户取消', 'AbortError')),
+    );
+    const outcome = await shareOrDownloadCanvas(
+      makeCanvas(new Blob(['png'], { type: 'image/png' })),
+    );
+    expect(outcome).toBe('cancelled');
+    expect(clickSpy).not.toHaveBeenCalled();
+  });
+
+  it('分享过程出现非取消错误：failed，不补发下载', async () => {
+    stubShare(true, () => Promise.reject(new Error('系统分享不可用')));
+    const outcome = await shareOrDownloadCanvas(
+      makeCanvas(new Blob(['png'], { type: 'image/png' })),
+    );
+    expect(outcome).toBe('failed');
+    expect(clickSpy).not.toHaveBeenCalled();
+  });
+
+  it('环境不支持分享（无 canShare/share）：降级下载一次，downloaded', async () => {
+    const outcome = await shareOrDownloadCanvas(
+      makeCanvas(new Blob(['png'], { type: 'image/png' })),
+    );
+    expect(outcome).toBe('downloaded');
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('canShare 拒绝文件分享：降级下载一次，downloaded', async () => {
+    stubShare(false);
+    const outcome = await shareOrDownloadCanvas(
+      makeCanvas(new Blob(['png'], { type: 'image/png' })),
+    );
+    expect(outcome).toBe('downloaded');
+    expect(window.navigator.share).not.toHaveBeenCalled();
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('画布编码为空：failed，不下载也不调用分享', async () => {
+    stubShare(true);
+    const outcome = await shareOrDownloadCanvas(makeCanvas(null));
+    expect(outcome).toBe('failed');
+    expect(window.navigator.share).not.toHaveBeenCalled();
+    expect(clickSpy).not.toHaveBeenCalled();
   });
 });

@@ -94,11 +94,22 @@ export function downloadResultJson(result: AdjustmentResult): void {
   downloadBlob(stringifyResult(result), 'traverse-adjustment.json', 'application/json');
 }
 
-export function downloadCanvasPng(canvas: HTMLCanvasElement): void {
-  canvas.toBlob((blob) => {
-    if (!blob) return;
-    downloadBlob(blob, 'traverse-chart.png', 'image/png');
-  }, 'image/png');
+/**
+ * 下载画布 PNG。返回是否真正触发了下载：
+ * 画布编码为空（toBlob 回调 null，例如零尺寸/空白画布）时不产生任何下载，
+ * 调用方必须依据返回值给出准确提示，不得谎报成功。
+ */
+export function downloadCanvasPng(canvas: HTMLCanvasElement): Promise<boolean> {
+  return new Promise((resolve) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        resolve(false);
+        return;
+      }
+      downloadBlob(blob, 'traverse-chart.png', 'image/png');
+      resolve(true);
+    }, 'image/png');
+  });
 }
 
 interface ShareableNavigator {
@@ -106,30 +117,59 @@ interface ShareableNavigator {
   share?: (data: ShareData) => Promise<void>;
 }
 
+/** 画布共享结果：四种结局一一对应可观察状态，互不混淆 */
+export type ShareOutcome =
+  | 'shared' // 系统分享面板确认交付
+  | 'downloaded' // 环境不支持分享，已降级为下载 PNG
+  | 'cancelled' // 用户取消了系统分享面板，未产生任何文件
+  | 'failed'; // 画布编码失败或分享/下载过程出错
+
 /**
  * 画布共享：支持 Web Share（含文件）时走系统分享面板，
  * 否则降级为下载 PNG。保证离线环境下也有可用出口。
+ *
+ * 用户取消分享（AbortError）返回 'cancelled' 且不会补发下载——
+ * 取消就是取消，页面不得提示“已改为下载”。
  */
 export async function shareOrDownloadCanvas(
   canvas: HTMLCanvasElement,
-): Promise<'shared' | 'downloaded' | 'failed'> {
+): Promise<ShareOutcome> {
   const nav = navigator as ShareableNavigator;
+  let blob: Blob | null;
   try {
-    const blob = await new Promise<Blob | null>((resolve) =>
+    blob = await new Promise<Blob | null>((resolve) =>
       canvas.toBlob(resolve, 'image/png'),
     );
-    if (!blob) return 'failed';
+  } catch {
+    return 'failed';
+  }
+  if (!blob) return 'failed';
+
+  if (nav.canShare && nav.share) {
     const file = new File([blob], 'traverse-chart.png', { type: 'image/png' });
-    if (nav.canShare?.({ files: [file] }) && nav.share) {
-      await nav.share({ files: [file], title: '闭合导线平差结果' });
-      return 'shared';
+    let shareable = false;
+    try {
+      shareable = nav.canShare({ files: [file] });
+    } catch {
+      shareable = false;
     }
+    if (shareable) {
+      try {
+        await nav.share({ files: [file], title: '闭合导线平差结果' });
+        return 'shared';
+      } catch (err) {
+        if ((err as { name?: string } | null)?.name === 'AbortError') {
+          return 'cancelled';
+        }
+        return 'failed';
+      }
+    }
+  }
+
+  try {
     downloadBlob(blob, 'traverse-chart.png', 'image/png');
     return 'downloaded';
-  } catch (err) {
-    if (err instanceof DOMException && err.name === 'AbortError') {
-      return 'downloaded';
-    }
+  } catch {
     return 'failed';
   }
 }

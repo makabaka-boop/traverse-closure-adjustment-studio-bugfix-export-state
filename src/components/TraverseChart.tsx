@@ -10,6 +10,8 @@ import type { AdjustmentResult } from '../core/types';
 
 interface TraverseChartProps {
   result: AdjustmentResult | null;
+  /** 每次绘制尝试后回报：画布是否真正画上了当前结果（零尺寸/无上下文时为 false） */
+  onDrawnChange?: (drawn: boolean) => void;
 }
 
 const PADDING = 48;
@@ -72,13 +74,18 @@ function drawPolyline(
   ctx.stroke();
 }
 
-function renderChart(canvas: HTMLCanvasElement, result: AdjustmentResult): void {
+/**
+ * 绘制叠画图。返回是否真正落笔：
+ * 画布无 2D 上下文或 CSS 尺寸为零（面板隐藏等）时直接返回 false，
+ * 此时画布位图保持旧内容或空白，调用方不得把它当作当前结果导出。
+ */
+function renderChart(canvas: HTMLCanvasElement, result: AdjustmentResult): boolean {
   const ctx = canvas.getContext('2d');
-  if (!ctx) return;
+  if (!ctx) return false;
   const dpr = window.devicePixelRatio || 1;
   const cssW = canvas.clientWidth;
   const cssH = canvas.clientHeight;
-  if (cssW === 0 || cssH === 0) return;
+  if (cssW === 0 || cssH === 0) return false;
   canvas.width = Math.round(cssW * dpr);
   canvas.height = Math.round(cssH * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -186,20 +193,21 @@ function renderChart(canvas: HTMLCanvasElement, result: AdjustmentResult): void 
   ctx.textAlign = 'right';
   ctx.fillText(`单位 mm，网格 ${step}`, cssW - 12, cssH - 12);
   ctx.textAlign = 'left';
+  return true;
 }
 
-export function TraverseChart({ result }: TraverseChartProps) {
+export function TraverseChart({ result, onDrawnChange }: TraverseChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !result) return;
-    const draw = () => renderChart(canvas, result);
+    const draw = () => onDrawnChange?.(renderChart(canvas, result));
     draw();
     const ro = new ResizeObserver(draw);
     ro.observe(canvas);
     return () => ro.disconnect();
-  }, [result]);
+  }, [result, onDrawnChange]);
 
   if (!result) {
     return (
